@@ -1,0 +1,4 @@
+../Core/Src/bootloader.c:9:6:Read_Raw_CSR	16	static
+../Core/Src/bootloader.c:28:6:JumpToSystemBootloader	16	static,ignoring_inline_asm
+../Core/Src/bootloader.c:83:6:AppStart	24	static,ignoring_inline_asm
+../Core/Src/bootloader.c:102:6:FeedWatchdog	4	static

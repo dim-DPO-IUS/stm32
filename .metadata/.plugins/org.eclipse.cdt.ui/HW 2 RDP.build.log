@@ -1,0 +1,10 @@
+21:07:44 **** Incremental Build of configuration Debug for project HW 2 RDP ****
+make -j16 all 
+arm-none-eabi-size  HW\ 2\ RDP.elf 
+   text	   data	    bss	    dec	    hex	filename
+   9348	     12	   1676	  11036	   2b1c	HW 2 RDP.elf
+Finished building: default.size.stdout
+ 
+
+21:07:44 Build Finished. 0 errors, 0 warnings. (took 77ms)
+

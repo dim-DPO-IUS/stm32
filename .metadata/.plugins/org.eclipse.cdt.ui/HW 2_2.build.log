@@ -1,0 +1,22 @@
+22:43:33 **** Incremental Build of configuration Debug for project HW 2_2 ****
+make -j16 all 
+arm-none-eabi-gcc -o "HW 2_2.elf" @"objects.list"   -mcpu=cortex-m4 -T"/mnt/DATA-1/0Dev/MC-Dev/0-LESSONS/01/src/work4dak/stm32/HW 2_2/STM32F411RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="HW 2_2.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: HW 2_2.elf
+ 
+arm-none-eabi-size  HW\ 2_2.elf 
+arm-none-eabi-objdump -h -S HW\ 2_2.elf  > "HW 2_2.list"
+arm-none-eabi-objcopy  -O ihex HW\ 2_2.elf  "HW 2_2.hex"
+arm-none-eabi-objcopy  -O binary HW\ 2_2.elf  "HW 2_2.bin"
+   text	   data	    bss	    dec	    hex	filename
+   7900	     12	   1644	   9556	   2554	HW 2_2.elf
+Finished building: default.size.stdout
+ 
+Finished building: HW 2_2.bin
+Finished building: HW 2_2.hex
+ 
+ 
+Finished building: HW 2_2.list
+ 
+
+22:43:33 Build Finished. 0 errors, 0 warnings. (took 331ms)
+

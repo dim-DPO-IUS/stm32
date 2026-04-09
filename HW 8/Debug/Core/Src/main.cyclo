@@ -1,0 +1,10 @@
+../Core/Src/main.c:131:5:main	5
+../Core/Src/main.c:237:6:SystemClock_Config	3
+../Core/Src/main.c:284:13:MX_USART2_UART_Init	2
+../Core/Src/main.c:317:13:MX_GPIO_Init	1
+../Core/Src/main.c:365:9:STM32_AES_XTS_Encrypt	3
+../Core/Src/main.c:419:9:STM32_AES_XTS_Decrypt	3
+../Core/Src/main.c:460:12:Buffercmp	3
+../Core/Src/main.c:481:13:Led_Config	1
+../Core/Src/main.c:499:13:Led_Toggle	2
+../Core/Src/main.c:514:6:Error_Handler	1

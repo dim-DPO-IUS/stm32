@@ -1,0 +1,369 @@
+#ifndef MYLIB_H
+#define MYLIB_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+// ============================================================================
+//  КОНФИГУРАЦИЯ (СЕКТОР 4)
+// ============================================================================
+
+#define SECTOR_4_START          0x08010000UL
+#define SECTOR_4_END            0x0801FFFFUL
+#define SECTOR_4_SIZE           65536U
+
+extern UART_HandleTypeDef huart2;
+
+#define DEBUG_UART(msg) \
+    do { \
+        HAL_UART_Transmit(&huart2, (uint8_t*)(msg), strlen(msg), 100); \
+    } while(0)
+
+static const uint32_t target_addresses[] = {
+    0x08010000,
+    0x08010010,
+    0x08010020,
+    0x08010030,
+    0x08010040,
+    0x08010050
+};
+
+#define TARGET_ADDR_COUNT       (sizeof(target_addresses) / sizeof(target_addresses[0]))
+#define HEX_LINE_BUFFER_SIZE    128
+#define MAX_DATA_PER_ADDRESS    16
+
+#define ERROR_NONE              0
+#define ERROR_USB_INIT          1
+#define ERROR_CRC               2
+#define ERROR_ADDR_OUT_OF_RANGE 3
+#define ERROR_ADDR_NOT_FOUND    4
+#define ERROR_FLASH_ERASE       5
+#define ERROR_FLASH_WRITE       6
+#define ERROR_RX_TIMEOUT        7
+
+// ============================================================================
+//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================================================
+extern uint8_t g_last_error;
+extern bool g_hex_processing_done;
+
+// ============================================================================
+//  ОБЪЯВЛЕНИЯ ФУНКЦИЙ
+// ============================================================================
+void HexProcessing_Init(void);
+bool HexProcessing_ProcessLine(char* line);
+bool HexProcessing_Finalize(void);
+void SetError(uint8_t error_code);
+void FeedWatchdog(void);
+HAL_StatusTypeDef Flash_EraseSector4(void);
+HAL_StatusTypeDef Flash_WriteData(uint32_t addr, const uint8_t* data, uint32_t len);
+
+// ============================================================================
+//  СТАТИЧЕСКИЕ ПЕРЕМЕННЫЕ
+// ============================================================================
+static uint32_t _ext_linear_addr = 0;
+static uint16_t _ext_segment_addr = 0;
+static bool _use_linear = true;
+
+static bool _addr_found[TARGET_ADDR_COUNT];
+static uint8_t _addr_data[TARGET_ADDR_COUNT][MAX_DATA_PER_ADDRESS];
+static uint8_t _addr_data_len[TARGET_ADDR_COUNT];
+static bool _sector4_erased = false;
+
+uint8_t g_last_error = 0;
+bool g_hex_processing_done = false;
+static int _data_lines_received = 0;
+
+// БУФЕР ДЛЯ ОТЛАДКИ (ИСПРАВЛЕНО: ОБЪЯВЛЕН ЗДЕСЬ)
+static char dbg_buf[128];
+
+// ============================================================================
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
+
+static inline uint8_t _hexCharToByte(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+static inline bool _hexCheckCRC(const char* line, uint16_t len)
+{
+    if (len < 11 || line[0] != ':') return false;
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+    if (byte_count < 4) return false;
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < byte_count - 1; i++) sum += bytes[i];
+    uint8_t crc_calculated = 0x01 + (uint8_t)(~sum & 0xFF);
+    uint8_t crc_received = bytes[byte_count - 1];
+    return (crc_calculated == crc_received);
+}
+
+static inline bool _hexParseLine(const char* line, uint32_t* abs_addr,
+                                  uint8_t* data, uint8_t* data_len, uint8_t* record_type)
+{
+    if (line[0] != ':') return false;
+    uint16_t len = strlen(line);
+    if (len < 11) return false;
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+    if (byte_count < 4) return false;
+    uint8_t rec_len = bytes[0];
+    uint16_t addr = (bytes[1] << 8) | bytes[2];
+    uint8_t rtype = bytes[3];
+    if (_use_linear) *abs_addr = _ext_linear_addr + addr;
+    else *abs_addr = ((uint32_t)_ext_segment_addr << 4) + addr;
+    *record_type = rtype;
+    if (rtype == 0x00 && rec_len > 0 && byte_count >= 4 + rec_len + 1)
+    {
+        *data_len = rec_len;
+        for (uint8_t i = 0; i < rec_len; i++) data[i] = bytes[4 + i];
+    }
+    else *data_len = 0;
+    return true;
+}
+
+static inline void _hexUpdateExtendedAddress(uint8_t record_type, const uint8_t* data, uint8_t data_len)
+{
+    if (record_type == 0x04 && data_len >= 2)
+    {
+        _ext_linear_addr = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16);
+        _use_linear = true;
+        DEBUG_UART("[DBG] Extended Linear Address updated\r\n");
+    }
+    else if (record_type == 0x02 && data_len >= 2)
+    {
+        _ext_segment_addr = (data[0] << 8) | data[1];
+        _use_linear = false;
+        DEBUG_UART("[DBG] Extended Segment Address updated\r\n");
+    }
+}
+
+// ============================================================================
+//  ПУБЛИЧНЫЕ ФУНКЦИИ
+// ============================================================================
+
+void HexProcessing_Init(void)
+{
+    DEBUG_UART("[DBG] HexProcessing_Init() called\r\n");
+    _ext_linear_addr = 0;
+    _ext_segment_addr = 0;
+    _use_linear = true;
+    _sector4_erased = false;
+    g_hex_processing_done = false;
+    _data_lines_received = 0;
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        _addr_found[i] = false;
+        _addr_data_len[i] = 0;
+        memset(_addr_data[i], 0xFF, MAX_DATA_PER_ADDRESS);
+    }
+}
+
+bool HexProcessing_ProcessLine(char* line)
+{
+    char* nl = strchr(line, '\r'); if (nl) *nl = '\0';
+    nl = strchr(line, '\n'); if (nl) *nl = '\0';
+    if (strlen(line) == 0) return true;
+    if (line[0] != ':') return true;
+
+    snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Line: %.20s...\r\n", line);
+    DEBUG_UART(dbg_buf);
+
+    if (!_hexCheckCRC(line, strlen(line)))
+    {
+        DEBUG_UART("[DBG] CRC check FAILED\r\n");
+        SetError(ERROR_CRC);
+        return false;
+    }
+
+    uint32_t abs_addr = 0;
+    uint8_t data[MAX_DATA_PER_ADDRESS];
+    uint8_t data_len = 0;
+    uint8_t record_type = 0;
+
+    if (!_hexParseLine(line, &abs_addr, data, &data_len, &record_type))
+    {
+        DEBUG_UART("[DBG] Parse FAILED\r\n");
+        return true;
+    }
+
+    if (record_type == 0x02 || record_type == 0x04)
+    {
+        _hexUpdateExtendedAddress(record_type, data, data_len);
+        return true;
+    }
+
+    if (record_type == 0x01)
+    {
+        DEBUG_UART("[DBG] EOF record (type 01) received!\r\n");
+        g_hex_processing_done = true;
+        return true;
+    }
+
+    if (record_type == 0x03 || record_type == 0x05)
+    {
+        DEBUG_UART("[DBG] Record type 03/05 ignored\r\n");
+        return true;
+    }
+
+    if (record_type == 0x00)
+    {
+        _data_lines_received++;
+        snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Data record #%d: addr=0x%08lX, len=%d\r\n", _data_lines_received, abs_addr, data_len);
+        DEBUG_UART(dbg_buf);
+
+        if (abs_addr < SECTOR_4_START || abs_addr > SECTOR_4_END)
+        {
+            snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] ERROR: addr 0x%08lX out of range!\r\n", abs_addr);
+            DEBUG_UART(dbg_buf);
+            SetError(ERROR_ADDR_OUT_OF_RANGE);
+            return false;
+        }
+
+        for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+        {
+            if (abs_addr == target_addresses[i] && !_addr_found[i])
+            {
+                _addr_found[i] = true;
+                _addr_data_len[i] = (data_len < MAX_DATA_PER_ADDRESS) ? data_len : MAX_DATA_PER_ADDRESS;
+                memcpy(_addr_data[i], data, _addr_data_len[i]);
+                snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Stored data for target address 0x%08lX\r\n", abs_addr);
+                DEBUG_UART(dbg_buf);
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+bool HexProcessing_Finalize(void)
+{
+    DEBUG_UART("[DBG] HexProcessing_Finalize() called\r\n");
+
+    snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Total data lines received: %d\r\n", _data_lines_received);
+    DEBUG_UART(dbg_buf);
+
+    DEBUG_UART("[DBG] Checking target addresses...\r\n");
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Target[%d]: 0x%08lX - %s\r\n", i, target_addresses[i], _addr_found[i] ? "FOUND" : "MISSING");
+        DEBUG_UART(dbg_buf);
+        if (!_addr_found[i])
+        {
+            DEBUG_UART("[DBG] ERROR: Not all target addresses found!\r\n");
+            SetError(ERROR_ADDR_NOT_FOUND);
+            return false;
+        }
+    }
+
+    // ===== СТИРАНИЕ ОТКЛЮЧЕНО ДЛЯ ДИАГНОСТИКИ =====
+    /*
+    DEBUG_UART("[DBG] Erasing Sector 4...\r\n");
+    if (!_sector4_erased)
+    {
+        HAL_StatusTypeDef erase_status = Flash_EraseSector4();
+        if (erase_status != HAL_OK)
+        {
+            snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] ERROR: Flash erase failed with status %d\r\n", erase_status);
+            DEBUG_UART(dbg_buf);
+            SetError(ERROR_FLASH_ERASE);
+            return false;
+        }
+        _sector4_erased = true;
+        DEBUG_UART("[DBG] Sector 4 erased successfully\r\n");
+    }
+    */
+
+    DEBUG_UART("[DBG] Writing data to Flash...\r\n");
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (_addr_data_len[i] > 0)
+        {
+            snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Writing %d bytes to 0x%08lX\r\n", _addr_data_len[i], target_addresses[i]);
+            DEBUG_UART(dbg_buf);
+
+            HAL_StatusTypeDef write_status = Flash_WriteData(target_addresses[i], _addr_data[i], _addr_data_len[i]);
+            if (write_status != HAL_OK)
+            {
+                snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] ERROR: Flash write failed with status %d\r\n", write_status);
+                DEBUG_UART(dbg_buf);
+                SetError(ERROR_FLASH_WRITE);
+                return false;
+            }
+            DEBUG_UART("[DBG] Write OK\r\n");
+        }
+    }
+
+    DEBUG_UART("[DBG] HexProcessing_Finalize() SUCCESS\r\n");
+    return true;
+}
+
+HAL_StatusTypeDef Flash_EraseSector4(void)
+{
+    DEBUG_UART("[DBG] Flash_EraseSector4(): Unlocking Flash...\r\n");
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+    FLASH_EraseInitTypeDef erase = { .TypeErase = FLASH_TYPEERASE_SECTORS, .VoltageRange = FLASH_VOLTAGE_RANGE_3, .Sector = FLASH_SECTOR_4, .NbSectors = 1 };
+    DEBUG_UART("[DBG] Flash_EraseSector4(): Erasing...\r\n");
+    uint32_t sector_error = 0;
+    HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Erase status: %d, sector_error: 0x%08lX\r\n", status, sector_error);
+    DEBUG_UART(dbg_buf);
+    HAL_FLASH_Lock();
+    return status;
+}
+
+HAL_StatusTypeDef Flash_WriteData(uint32_t addr, const uint8_t* data, uint32_t len)
+{
+    DEBUG_UART("[DBG] Flash_WriteData(): Unlocking Flash...\r\n");
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+
+    HAL_StatusTypeDef status = HAL_OK;
+    for (uint32_t i = 0; i < len; i += 4)
+    {
+        uint32_t word = 0xFFFFFFFF;
+        for (uint32_t j = 0; j < 4 && i + j < len; j++) ((uint8_t*)&word)[j] = data[i + j];
+
+        snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Programming word at 0x%08lX: 0x%08lX\r\n", addr + i, word);
+        DEBUG_UART(dbg_buf);
+
+        status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+        if (status != HAL_OK)
+        {
+            snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] Program failed at offset %lu, status %d\r\n", i, status);
+            DEBUG_UART(dbg_buf);
+            break;
+        }
+    }
+    HAL_FLASH_Lock();
+    return status;
+}
+
+void SetError(uint8_t error_code)
+{
+    g_last_error = error_code;
+    snprintf(dbg_buf, sizeof(dbg_buf), "[DBG] SetError called with code %d\r\n", error_code);
+    DEBUG_UART(dbg_buf);
+    // Индикация светодиодом опущена для краткости
+}
+
+#endif /* MYLIB_H */

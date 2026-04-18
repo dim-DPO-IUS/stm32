@@ -1,0 +1,381 @@
+#ifndef MYLIB_H
+#define MYLIB_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+
+// ============================================================================
+//  КОНФИГУРАЦИЯ
+// ============================================================================
+
+#define SECTOR_2_START          0x08008000UL
+#define SECTOR_2_END            0x0800BFFFUL
+#define SECTOR_2_SIZE           16384U
+
+// Целевые адреса (5-6 адресов в секторе 2)
+// ВНИМАНИЕ: замените на реальные адреса из вашей программы App!
+static const uint32_t target_addresses[] = {
+    0x08008000,
+    0x08008010,
+    0x08008020,
+    0x08008030,
+    0x08008040,
+    0x08008050
+};
+#define TARGET_ADDR_COUNT       (sizeof(target_addresses) / sizeof(target_addresses[0]))
+
+#define HEX_LINE_BUFFER_SIZE    128
+#define MAX_DATA_PER_ADDRESS    16
+
+// Коды ошибок
+#define ERROR_NONE              0
+#define ERROR_USB_INIT          1
+#define ERROR_CRC               2
+#define ERROR_ADDR_OUT_OF_RANGE 3
+#define ERROR_ADDR_NOT_FOUND    4
+#define ERROR_FLASH_ERASE       5
+#define ERROR_FLASH_WRITE       6
+#define ERROR_RX_TIMEOUT        7
+
+// ============================================================================
+//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (доступны из main.c)
+// ============================================================================
+extern uint8_t g_last_error;
+extern bool g_hex_processing_done;
+
+// ============================================================================
+//  ОБЪЯВЛЕНИЯ ФУНКЦИЙ
+// ============================================================================
+
+void HexProcessing_Init(void);
+bool HexProcessing_ProcessLine(char* line);
+bool HexProcessing_Finalize(void);
+void SetError(uint8_t error_code);
+void FeedWatchdog(void);
+HAL_StatusTypeDef Flash_EraseSector2(void);
+HAL_StatusTypeDef Flash_WriteData(uint32_t addr, const uint8_t* data, uint32_t len);
+
+// ============================================================================
+//  СТАТИЧЕСКИЕ ПЕРЕМЕННЫЕ ПАРСЕРА (внутри файла)
+// ============================================================================
+static uint32_t _ext_linear_addr = 0;
+static uint16_t _ext_segment_addr = 0;
+static bool _use_linear = true;
+
+static bool _addr_found[TARGET_ADDR_COUNT];
+static uint8_t _addr_data[TARGET_ADDR_COUNT][MAX_DATA_PER_ADDRESS];
+static uint8_t _addr_data_len[TARGET_ADDR_COUNT];
+static bool _sector2_erased = false;
+
+uint8_t g_last_error = 0;
+bool g_hex_processing_done = false;
+
+// ============================================================================
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (static inline)
+// ============================================================================
+
+static inline uint8_t _hexCharToByte(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+static inline bool _hexCheckCRC(const char* line, uint16_t len)
+{
+    if (len < 11 || line[0] != ':') return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+
+    if (byte_count < 4) return false;
+
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < byte_count - 1; i++)
+    {
+        sum += bytes[i];
+    }
+
+    uint8_t crc_calculated = 0x01 + (uint8_t)(~sum & 0xFF);
+    uint8_t crc_received = bytes[byte_count - 1];
+
+    return (crc_calculated == crc_received);
+}
+
+static inline bool _hexParseLine(const char* line, uint32_t* abs_addr,
+                                  uint8_t* data, uint8_t* data_len, uint8_t* record_type)
+{
+    if (line[0] != ':') return false;
+
+    uint16_t len = strlen(line);
+    if (len < 11) return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+
+    if (byte_count < 4) return false;
+
+    uint8_t rec_len = bytes[0];
+    uint16_t addr = (bytes[1] << 8) | bytes[2];
+    uint8_t rtype = bytes[3];
+
+    if (_use_linear)
+    {
+        *abs_addr = _ext_linear_addr + addr;
+    }
+    else
+    {
+        *abs_addr = ((uint32_t)_ext_segment_addr << 4) + addr;
+    }
+
+    *record_type = rtype;
+
+    if (rtype == 0x00 && rec_len > 0 && byte_count >= 4 + rec_len + 1)
+    {
+        *data_len = rec_len;
+        for (uint8_t i = 0; i < rec_len; i++)
+        {
+            data[i] = bytes[4 + i];
+        }
+    }
+    else
+    {
+        *data_len = 0;
+    }
+
+    return true;
+}
+
+static inline void _hexUpdateExtendedAddress(uint8_t record_type, const uint8_t* data, uint8_t data_len)
+{
+    if (record_type == 0x04 && data_len >= 2)
+    {
+        _ext_linear_addr = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16);
+        _use_linear = true;
+    }
+    else if (record_type == 0x02 && data_len >= 2)
+    {
+        _ext_segment_addr = (data[0] << 8) | data[1];
+        _use_linear = false;
+    }
+}
+
+static inline void _hexResetExtendedAddress(void)
+{
+    _ext_linear_addr = 0;
+    _ext_segment_addr = 0;
+    _use_linear = true;
+}
+
+// ============================================================================
+//  РЕАЛИЗАЦИИ ПУБЛИЧНЫХ ФУНКЦИЙ
+// ============================================================================
+
+void HexProcessing_Init(void)
+{
+    _hexResetExtendedAddress();
+    _sector2_erased = false;
+    g_hex_processing_done = false;
+
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        _addr_found[i] = false;
+        _addr_data_len[i] = 0;
+        memset(_addr_data[i], 0xFF, MAX_DATA_PER_ADDRESS);
+    }
+}
+
+bool HexProcessing_ProcessLine(char* line)
+{
+    // Удаляем символы новой строки
+    char* nl = strchr(line, '\r');
+    if (nl) *nl = '\0';
+    nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+
+    if (strlen(line) == 0) return true;
+    if (line[0] != ':') return true;
+
+    if (!_hexCheckCRC(line, strlen(line)))
+    {
+        SetError(ERROR_CRC);
+        return false;
+    }
+
+    uint32_t abs_addr = 0;
+    uint8_t data[MAX_DATA_PER_ADDRESS];
+    uint8_t data_len = 0;
+    uint8_t record_type = 0;
+
+    if (!_hexParseLine(line, &abs_addr, data, &data_len, &record_type))
+    {
+        return true;
+    }
+
+    if (record_type == 0x02 || record_type == 0x04)
+    {
+        _hexUpdateExtendedAddress(record_type, data, data_len);
+        return true;
+    }
+
+    if (record_type == 0x01)
+    {
+        g_hex_processing_done = true;
+        return true;
+    }
+
+    if (record_type == 0x03 || record_type == 0x05)
+    {
+        return true;
+    }
+
+    if (record_type == 0x00)
+    {
+        if (abs_addr < SECTOR_2_START || abs_addr > SECTOR_2_END)
+        {
+            SetError(ERROR_ADDR_OUT_OF_RANGE);
+            return false;
+        }
+
+        for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+        {
+            if (abs_addr == target_addresses[i] && !_addr_found[i])
+            {
+                _addr_found[i] = true;
+                _addr_data_len[i] = (data_len < MAX_DATA_PER_ADDRESS) ? data_len : MAX_DATA_PER_ADDRESS;
+                memcpy(_addr_data[i], data, _addr_data_len[i]);
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool HexProcessing_Finalize(void)
+{
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (!_addr_found[i])
+        {
+            SetError(ERROR_ADDR_NOT_FOUND);
+            return false;
+        }
+    }
+
+    if (!_sector2_erased)
+    {
+        if (Flash_EraseSector2() != HAL_OK)
+        {
+            SetError(ERROR_FLASH_ERASE);
+            return false;
+        }
+        _sector2_erased = true;
+    }
+
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (_addr_data_len[i] > 0)
+        {
+            if (Flash_WriteData(target_addresses[i], _addr_data[i], _addr_data_len[i]) != HAL_OK)
+            {
+                SetError(ERROR_FLASH_WRITE);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+HAL_StatusTypeDef Flash_EraseSector2(void)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase = FLASH_TYPEERASE_SECTORS,
+        .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+        .Sector = FLASH_SECTOR_2,
+        .NbSectors = 1
+    };
+
+    uint32_t sector_error = 0;
+    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+HAL_StatusTypeDef Flash_WriteData(uint32_t addr, const uint8_t* data, uint32_t len)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    HAL_FLASH_Unlock();
+
+    for (uint32_t i = 0; i < len; i += 4)
+    {
+        uint32_t word = 0xFFFFFFFF;
+        for (uint32_t j = 0; j < 4 && i + j < len; j++)
+        {
+            ((uint8_t*)&word)[j] = data[i + j];
+        }
+
+        status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+        if (status != HAL_OK) break;
+    }
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+static void _blinkErrorCode(uint8_t error_code)
+{
+    if (error_code == 0)
+    {
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+        return;
+    }
+
+    for (uint8_t cycle = 0; cycle < 3; cycle++)
+    {
+        for (uint8_t i = 0; i < error_code; i++)
+        {
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+            HAL_Delay(50);
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+            HAL_Delay(50);
+        }
+        HAL_Delay(500);
+    }
+}
+
+void SetError(uint8_t error_code)
+{
+    g_last_error = error_code;
+    _blinkErrorCode(error_code);
+}
+
+void FeedWatchdog(void)
+{
+    IWDG->KR = 0xAAAA;
+}
+
+#endif /* MYLIB_H */

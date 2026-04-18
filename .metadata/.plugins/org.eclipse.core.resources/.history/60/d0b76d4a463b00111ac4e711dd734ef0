@@ -1,0 +1,129 @@
+#include "led_indicator.h"
+
+static GPIO_TypeDef* _led_port = NULL;
+static uint16_t      _led_pin  = 0;
+static LedMode       _led_mode = LED_MODE_IDLE;
+
+static uint32_t _led_last_toggle = 0;
+static bool     _led_current_level = false;
+static uint8_t  _error_blink_phase = 0;
+
+static void _led_write(bool level)
+{
+    if (_led_port != NULL)
+    {
+        HAL_GPIO_WritePin(_led_port, _led_pin, level ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+    _led_current_level = level;
+}
+
+void led_init(GPIO_TypeDef* port, uint16_t pin)
+{
+    _led_port = port;
+    _led_pin  = pin;
+    _led_mode = LED_MODE_IDLE;
+    _led_last_toggle = HAL_GetTick();
+    _led_current_level = false;
+    _error_blink_phase = 0;
+    led_off();
+}
+
+void led_set_mode(LedMode mode)
+{
+    _led_mode = mode;
+    _led_last_toggle = HAL_GetTick();
+    _error_blink_phase = 0;
+
+    switch (mode)
+    {
+        case LED_MODE_PROGRAMMING:
+            led_on();
+            break;
+        case LED_MODE_SUCCESS:
+            led_off();
+            break;
+        case LED_MODE_ACTIVITY:
+            _led_current_level = false;
+            led_off();
+            break;
+        case LED_MODE_ERROR:
+            _led_current_level = false;
+            led_off();
+            break;
+        case LED_MODE_IDLE:
+        default:
+            break;
+    }
+}
+
+LedMode led_get_mode(void)
+{
+    return _led_mode;
+}
+
+void led_update(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    switch (_led_mode)
+    {
+        case LED_MODE_IDLE:
+            break;
+
+        case LED_MODE_PROGRAMMING:
+            break;
+
+        case LED_MODE_ACTIVITY:
+            if ((now - _led_last_toggle) >= 50)
+            {
+                _led_last_toggle = now;
+                led_toggle();
+            }
+            break;
+
+        case LED_MODE_SUCCESS:
+            break;
+
+        case LED_MODE_ERROR:
+            if (_error_blink_phase == 0)
+            {
+                if (!_led_current_level)
+                {
+                    led_on();
+                }
+                if ((now - _led_last_toggle) >= 100)
+                {
+                    _led_last_toggle = now;
+                    _error_blink_phase = 1;
+                }
+            }
+            else
+            {
+                if (_led_current_level)
+                {
+                    led_off();
+                }
+                if ((now - _led_last_toggle) >= 900)
+                {
+                    _led_last_toggle = now;
+                    _error_blink_phase = 0;
+                }
+            }
+            break;
+    }
+}
+
+void led_on(void)
+{
+    _led_write(true);
+}
+
+void led_off(void)
+{
+    _led_write(false);
+}
+
+void led_toggle(void)
+{
+    _led_write(!_led_current_level);
+}

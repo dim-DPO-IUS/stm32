@@ -1,0 +1,7 @@
+../Core/Src/hex_parser.c:16:13:_hexCheckCRC	160	static
+../Core/Src/hex_parser.c:40:13:_hexUpdateExtendedAddress	16	static
+../Core/Src/hex_parser.c:58:6:hex_parser_init	4	static
+../Core/Src/hex_parser.c:65:6:hex_parser_parse_line	168	static
+../Core/Src/hex_parser.c:119:10:hex_parser_get_ela	4	static
+../Core/Src/hex_parser.c:124:10:hex_parser_get_esa	4	static
+../Core/Src/hex_parser.c:129:6:hex_parser_using_linear	4	static

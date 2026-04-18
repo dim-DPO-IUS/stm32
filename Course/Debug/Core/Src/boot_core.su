@@ -1,0 +1,4 @@
+../Core/Src/boot_core.c:45:6:HexProcessing_Init	16	static
+../Core/Src/boot_core.c:59:6:HexProcessing_ProcessLine	296	static
+../Core/Src/boot_core.c:125:6:HexProcessing_Finalize	16	static
+../Core/Src/boot_core.c:164:6:SetError	16	static

@@ -1,0 +1,39 @@
+#ifndef FLASH_MANAGER_H
+#define FLASH_MANAGER_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include "stm32f4xx_hal.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    FLASH_OK = 0,
+    FLASH_ERR_UNLOCK,
+    FLASH_ERR_ERASE,
+    FLASH_ERR_PROGRAM,
+    FLASH_ERR_LOCK
+} FlashStatus;
+
+typedef struct {
+    uint32_t start_address;
+    uint32_t end_address;
+    uint32_t sector;
+} FlashRegion;
+
+void flash_manager_init(void);
+FlashStatus flash_unlock(void);
+FlashStatus flash_lock(void);
+FlashStatus flash_erase_sector(uint32_t sector, uint8_t voltage_range);
+FlashStatus flash_erase_region(const FlashRegion* region, uint8_t voltage_range);
+FlashStatus flash_write_data(uint32_t address, const uint8_t* data, size_t len);
+void flash_clear_errors(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FLASH_MANAGER_H */

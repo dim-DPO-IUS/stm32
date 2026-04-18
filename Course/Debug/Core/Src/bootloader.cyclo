@@ -1,0 +1,4 @@
+../Core/Src/bootloader.c:11:6:Read_Raw_CSR	1
+../Core/Src/bootloader.c:30:6:JumpToSystemBootloader	3
+../Core/Src/bootloader.c:57:6:AppStart	6
+../Core/Src/bootloader.c:89:6:FeedWatchdog	1

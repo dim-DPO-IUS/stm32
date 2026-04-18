@@ -1,0 +1,32 @@
+#ifndef LED_INDICATOR_H
+#define LED_INDICATOR_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "stm32f4xx_hal.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    LED_MODE_IDLE = 0,
+    LED_MODE_PROGRAMMING,
+    LED_MODE_ACTIVITY,
+    LED_MODE_SUCCESS,
+    LED_MODE_ERROR
+} LedMode;
+
+void led_init(GPIO_TypeDef* port, uint16_t pin);
+void led_set_mode(LedMode mode);
+LedMode led_get_mode(void);
+void led_update(void);
+void led_on(void);
+void led_off(void);
+void led_toggle(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LED_INDICATOR_H */

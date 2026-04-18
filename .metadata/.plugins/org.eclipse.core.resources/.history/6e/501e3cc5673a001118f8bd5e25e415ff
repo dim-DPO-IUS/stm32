@@ -1,0 +1,204 @@
+#ifndef MYLIB_H
+#define MYLIB_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+
+// ============================================================================
+//  КОНФИГУРАЦИЯ (СЕКТОР 4)
+// ============================================================================
+#define SECTOR_4_START          0x08010000UL
+#define SECTOR_4_END            0x0801FFFFUL
+#define MAX_DATA_LEN            64
+
+// ============================================================================
+//  ТЕСТОВЫЙ HEX-ФАЙЛ (ВАЛИДНЫЕ CRC ДЛЯ СЕКТОРА 4)
+// ============================================================================
+static const char* test_hex_lines[] = {
+    ":020000040801F1",
+    ":10000000000002203DC90008B9C80008C1C80008A6",
+    ":10001000C9C80008D1C80008D9C8000800000000FD",
+    ":10002000000000000000000000000000E1C800081F",
+    ":10003000EFC8000800000000FDC800080BC9000858",
+    ":100040008DC900088DC900088DC900088DC9000838",
+    ":00000001FF"
+};
+#define HEX_LINES_COUNT (sizeof(test_hex_lines) / sizeof(test_hex_lines[0]))
+
+// ============================================================================
+//  ХРАНИЛИЩЕ ДАННЫХ
+// ============================================================================
+#define MAX_BLOCKS 16
+static uint32_t _block_addr[MAX_BLOCKS];
+static uint8_t  _block_data[MAX_BLOCKS][MAX_DATA_LEN];
+static uint8_t  _block_len[MAX_BLOCKS];
+static uint32_t _block_count = 0;
+
+static uint32_t _ext_linear_addr = 0;
+static bool _processing_done = false;
+
+// ============================================================================
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
+static inline uint8_t _hexCharToByte(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+static bool _hexCheckCRC(const char* line)
+{
+    uint16_t len = strlen(line);
+    if (len < 11 || line[0] != ':') return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+
+    if (byte_count < 5) return false;
+
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < byte_count - 1; i++)
+        sum += bytes[i];
+
+    uint8_t crc_calculated = (0x100 - (sum & 0xFF)) & 0xFF;
+    uint8_t crc_received = bytes[byte_count - 1];
+
+    return (crc_calculated == crc_received);
+}
+
+static bool _parseHexLine(char* line)
+{
+    char* nl = strchr(line, '\r'); if (nl) *nl = '\0';
+    nl = strchr(line, '\n'); if (nl) *nl = '\0';
+
+    if (line[0] != ':') return true;
+
+    if (!_hexCheckCRC(line))
+        return false;
+
+    uint16_t len = strlen(line);
+    if (len < 11) return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len - 2; i += 2)
+    {
+        bytes[byte_count++] = (_hexCharToByte(line[i]) << 4) | _hexCharToByte(line[i+1]);
+    }
+
+    uint8_t rec_len  = bytes[0];
+    uint16_t addr    = (bytes[1] << 8) | bytes[2];
+    uint8_t rtype    = bytes[3];
+
+    uint32_t abs_addr = _ext_linear_addr + addr;
+
+    if (rtype == 0x04 && rec_len == 2)
+    {
+        _ext_linear_addr = ((uint32_t)bytes[4] << 24) | ((uint32_t)bytes[5] << 16);
+        return true;
+    }
+
+    if (rtype == 0x01)
+    {
+        _processing_done = true;
+        return true;
+    }
+
+    if (rtype == 0x00 && rec_len > 0)
+    {
+        if (abs_addr < SECTOR_4_START || abs_addr > SECTOR_4_END)
+            return false;
+
+        if (_block_count < MAX_BLOCKS)
+        {
+            _block_addr[_block_count] = abs_addr;
+            _block_len[_block_count] = rec_len;
+            for (uint8_t i = 0; i < rec_len; i++)
+                _block_data[_block_count][i] = bytes[4 + i];
+            _block_count++;
+        }
+    }
+
+    return true;
+}
+
+// ============================================================================
+//  ОСНОВНАЯ ТЕСТОВАЯ ФУНКЦИЯ
+// ============================================================================
+static inline HAL_StatusTypeDef Test_Flash_Write(void)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    _ext_linear_addr = 0;
+    _processing_done = false;
+    _block_count = 0;
+
+    for (uint32_t i = 0; i < HEX_LINES_COUNT; i++)
+    {
+        char line_buf[128];
+        strcpy(line_buf, test_hex_lines[i]);
+
+        if (!_parseHexLine(line_buf))
+        {
+            return HAL_ERROR;
+        }
+    }
+
+    if (!_processing_done)
+        return HAL_ERROR;
+
+    if (HAL_FLASH_Unlock() != HAL_OK)
+        return HAL_ERROR;
+
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
+                           FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase = FLASH_TYPEERASE_SECTORS,
+        .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+        .Sector = FLASH_SECTOR_4,
+        .NbSectors = 1
+    };
+    uint32_t sector_error = 0;
+    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    if (status != HAL_OK)
+    {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    for (uint32_t b = 0; b < _block_count; b++)
+    {
+        uint32_t addr = _block_addr[b];
+        uint8_t* data = _block_data[b];
+        uint8_t len = _block_len[b];
+
+        for (uint32_t i = 0; i < len; i += 4)
+        {
+            uint32_t word = 0xFFFFFFFF;
+            for (uint32_t j = 0; j < 4 && (i + j) < len; j++)
+                ((uint8_t*)&word)[j] = data[i + j];
+
+            status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+            if (status != HAL_OK) break;
+        }
+        if (status != HAL_OK) break;
+    }
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+#endif /* MYLIB_H */

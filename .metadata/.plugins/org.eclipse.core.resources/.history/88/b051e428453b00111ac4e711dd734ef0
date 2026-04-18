@@ -1,0 +1,127 @@
+#include "hex_parser.h"
+#include "crc_utils.h"
+#include <string.h>
+
+static uint32_t _ext_linear_addr = 0;
+static uint16_t _ext_segment_addr = 0;
+static bool     _use_linear = true;
+
+static bool _hex_check_crc(const char* line)
+{
+    size_t len = strlen(line);
+    if (len < 11 || line[0] != ':')
+        return false;
+
+    uint8_t bytes[256];
+    uint8_t byte_count = 0;
+
+    for (size_t i = 1; i < len; i += 2)
+    {
+        if (i + 1 >= len) break;
+        uint8_t hi = crc_hex_char_to_byte(line[i]);
+        uint8_t lo = crc_hex_char_to_byte(line[i + 1]);
+        bytes[byte_count++] = (hi << 4) | lo;
+    }
+
+    if (byte_count < 5)
+        return false;
+
+    uint8_t computed_crc = crc8_compute(bytes, byte_count - 1);
+    uint8_t received_crc = bytes[byte_count - 1];
+
+    return (computed_crc == received_crc);
+}
+
+static uint8_t _hex_extract_bytes(const char* line, uint8_t* bytes_out, uint8_t max_bytes)
+{
+    size_t len = strlen(line);
+    uint8_t count = 0;
+
+    for (size_t i = 1; i < len - 2 && count < max_bytes; i += 2)
+    {
+        uint8_t hi = crc_hex_char_to_byte(line[i]);
+        uint8_t lo = crc_hex_char_to_byte(line[i + 1]);
+        bytes_out[count++] = (hi << 4) | lo;
+    }
+
+    return count;
+}
+
+void hex_parser_init(void)
+{
+    _ext_linear_addr = 0;
+    _ext_segment_addr = 0;
+    _use_linear = true;
+}
+
+bool hex_parser_parse_line(const char* line, HexRecord* record)
+{
+    if (line == NULL || record == NULL)
+        return false;
+
+    memset(record, 0, sizeof(HexRecord));
+
+    size_t len = strlen(line);
+    if (len < 11 || line[0] != ':')
+        return false;
+
+    record->crc_valid = _hex_check_crc(line);
+
+    uint8_t bytes[256];
+    uint8_t byte_count = _hex_extract_bytes(line, bytes, sizeof(bytes));
+
+    if (byte_count < 4)
+        return false;
+
+    uint8_t rec_len  = bytes[0];
+    uint16_t addr    = ((uint16_t)bytes[1] << 8) | bytes[2];
+    uint8_t rtype    = bytes[3];
+
+    record->type = (HexRecordType)rtype;
+
+    if (_use_linear)
+    {
+        record->address = _ext_linear_addr + addr;
+    }
+    else
+    {
+        record->address = ((uint32_t)_ext_segment_addr << 4) + addr;
+    }
+
+    if (rec_len > 0 && byte_count >= (uint8_t)(4 + rec_len))
+    {
+        record->data_len = rec_len;
+        for (uint8_t i = 0; i < rec_len; i++)
+        {
+            record->data[i] = bytes[4 + i];
+        }
+    }
+
+    if (rtype == HEX_RECORD_ELA && rec_len >= 2)
+    {
+        _ext_linear_addr = ((uint32_t)bytes[4] << 24) | ((uint32_t)bytes[5] << 16);
+        _use_linear = true;
+    }
+    else if (rtype == HEX_RECORD_ESA && rec_len >= 2)
+    {
+        _ext_segment_addr = ((uint16_t)bytes[4] << 8) | bytes[5];
+        _use_linear = false;
+    }
+
+    return true;
+}
+
+uint32_t hex_parser_get_ela(void)
+{
+    return _ext_linear_addr;
+}
+
+uint16_t hex_parser_get_esa(void)
+{
+    return _ext_segment_addr;
+}
+
+bool hex_parser_using_linear(void)
+{
+    return _use_linear;
+}

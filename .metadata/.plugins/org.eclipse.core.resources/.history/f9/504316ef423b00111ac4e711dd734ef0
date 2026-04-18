@@ -1,0 +1,20 @@
+#ifndef CRC_UTILS_H
+#define CRC_UTILS_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+uint8_t crc8_compute(const uint8_t* data, size_t len);
+bool crc8_verify(const uint8_t* data, size_t len, uint8_t expected_crc);
+uint8_t crc_hex_char_to_byte(char c);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CRC_UTILS_H */

@@ -1,0 +1,2 @@
+../Core/Src/crc_utils.c:3:9:crc_hex_char_to_byte	16	static
+../Core/Src/crc_utils.c:11:9:crc8_compute	24	static

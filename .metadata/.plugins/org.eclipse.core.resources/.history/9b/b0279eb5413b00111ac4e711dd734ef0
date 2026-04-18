@@ -1,0 +1,237 @@
+#include "boot_core.h"
+#include "hex_parser.h"
+#include "flash_manager.h"
+#include "led_indicator.h"
+#include <string.h>
+
+// ============================================================================
+//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================================================
+uint8_t g_last_error = ERROR_NONE;
+bool g_hex_processing_done = false;
+
+// ============================================================================
+//  ВНУТРЕННИЕ ПЕРЕМЕННЫЕ (БУФЕРЫ ДЛЯ НАКОПЛЕНИЯ ДАННЫХ)
+// ============================================================================
+static bool     _addr_found[TARGET_ADDR_COUNT];
+static uint8_t  _addr_data[TARGET_ADDR_COUNT][MAX_DATA_PER_ADDRESS];
+static uint8_t  _addr_data_len[TARGET_ADDR_COUNT];
+static bool     _sector_erased = false;
+
+// ============================================================================
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
+
+/**
+ * @brief Проверка, находится ли адрес в целевом секторе
+ */
+static bool _is_address_in_sector(uint32_t addr)
+{
+    return (addr >= BOOT_SECTOR_START && addr <= BOOT_SECTOR_END);
+}
+
+/**
+ * @brief Поиск индекса целевого адреса в массиве TARGET_ADDRESSES
+ * @param addr Адрес для поиска
+ * @return     Индекс (0..TARGET_ADDR_COUNT-1) или -1 при отсутствии
+ */
+static int _find_target_address_index(uint32_t addr)
+{
+    for (int i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (addr == TARGET_ADDRESSES[i])
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief Проверка, все ли целевые адреса найдены
+ */
+static bool _all_targets_found(void)
+{
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (!_addr_found[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Очистка буферов накопленных данных
+ */
+static void _clear_buffers(void)
+{
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        _addr_found[i] = false;
+        _addr_data_len[i] = 0;
+        memset(_addr_data[i], 0xFF, MAX_DATA_PER_ADDRESS);
+    }
+    _sector_erased = false;
+}
+
+// ============================================================================
+//  ПУБЛИЧНЫЕ ФУНКЦИИ
+// ============================================================================
+
+void boot_core_init(void)
+{
+    hex_parser_init();
+    flash_manager_init();
+    _clear_buffers();
+    g_hex_processing_done = false;
+    g_last_error = ERROR_NONE;
+}
+
+void boot_core_reset(void)
+{
+    hex_parser_init();
+    _clear_buffers();
+    g_hex_processing_done = false;
+}
+
+bool boot_core_process_line(char* line)
+{
+    if (line == NULL)
+        return true;
+
+    // Очистка от \r и \n
+    char* nl = strchr(line, '\r');
+    if (nl) *nl = '\0';
+    nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+
+    size_t len = strlen(line);
+    if (len == 0)
+        return true;
+
+    if (line[0] != ':')
+        return true;
+
+    HexRecord record;
+    if (!hex_parser_parse_line(line, &record))
+    {
+        return true;
+    }
+
+    // Обработка по типу записи
+    switch (record.type)
+    {
+        case HEX_RECORD_DATA:
+        {
+            // Индикация активности
+            led_set_mode(LED_MODE_ACTIVITY);
+
+            // Проверка границ сектора
+            if (!_is_address_in_sector(record.address))
+            {
+                boot_core_set_error(ERROR_ADDR_OUT_OF_RANGE);
+                return false;
+            }
+
+            // Поиск целевого адреса
+            int idx = _find_target_address_index(record.address);
+            if (idx >= 0 && !_addr_found[idx])
+            {
+                _addr_found[idx] = true;
+                _addr_data_len[idx] = (record.data_len < MAX_DATA_PER_ADDRESS)
+                                      ? record.data_len : MAX_DATA_PER_ADDRESS;
+                memcpy(_addr_data[idx], record.data, _addr_data_len[idx]);
+            }
+            break;
+        }
+
+        case HEX_RECORD_EOF:
+        {
+            g_hex_processing_done = true;
+            break;
+        }
+
+        case HEX_RECORD_ESA:
+        case HEX_RECORD_ELA:
+            // Расширенные адреса уже обработаны в hex_parser
+            break;
+
+        case HEX_RECORD_SSA:
+        case HEX_RECORD_SLA:
+        default:
+            // Игнорируем
+            break;
+    }
+
+    return true;
+}
+
+bool boot_core_finalize(void)
+{
+    // Проверка, что все целевые адреса найдены
+    if (!_all_targets_found())
+    {
+        boot_core_set_error(ERROR_ADDR_NOT_FOUND);
+        return false;
+    }
+
+    // Стирание сектора
+    if (!_sector_erased)
+    {
+        led_set_mode(LED_MODE_ACTIVITY);
+
+        FlashStatus status = flash_erase_sector(BOOT_SECTOR_NUM, FLASH_VOLTAGE_RANGE_3);
+        if (status != FLASH_OK)
+        {
+            boot_core_set_error(ERROR_FLASH_ERASE);
+            return false;
+        }
+        _sector_erased = true;
+    }
+
+    // Разблокировка Flash
+    if (flash_unlock() != FLASH_OK)
+    {
+        boot_core_set_error(ERROR_FLASH_ERASE);
+        return false;
+    }
+
+    // Запись данных
+    led_set_mode(LED_MODE_ACTIVITY);
+
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (_addr_data_len[i] > 0)
+        {
+            FlashStatus status = flash_write_data(TARGET_ADDRESSES[i],
+                                                  _addr_data[i],
+                                                  _addr_data_len[i]);
+            if (status != FLASH_OK)
+            {
+                flash_lock();
+                boot_core_set_error(ERROR_FLASH_WRITE);
+                return false;
+            }
+        }
+    }
+
+    // Блокировка Flash
+    flash_lock();
+
+    // Успешное завершение
+    led_set_mode(LED_MODE_SUCCESS);
+    return true;
+}
+
+void boot_core_set_error(uint8_t error_code)
+{
+    g_last_error = error_code;
+    led_set_mode(LED_MODE_ERROR);
+}
+
+uint8_t boot_core_get_error(void)
+{
+    return g_last_error;
+}

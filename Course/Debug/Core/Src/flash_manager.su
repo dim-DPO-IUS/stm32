@@ -1,0 +1,2 @@
+../Core/Src/flash_manager.c:3:19:Flash_EraseSector4	40	static
+../Core/Src/flash_manager.c:26:19:Flash_WriteData	48	static

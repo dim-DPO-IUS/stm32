@@ -1,0 +1,76 @@
+#ifndef MYLIB_H
+#define MYLIB_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+// Массив целевых адресов (3 адреса в секторе 4)
+static const uint32_t target_addrs[] = {
+    0x08010000,
+    0x08010020,
+    0x08010040
+};
+#define ADDR_COUNT (sizeof(target_addrs) / sizeof(target_addrs[0]))
+
+// Уникальные паттерны для каждого адреса (по 16 байт)
+static const uint8_t patterns[ADDR_COUNT][16] = {
+    {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11},  // Адрес 0: все 0x11
+
+    {0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+     0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22},  // Адрес 1: все 0x22
+
+    {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+     0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33}   // Адрес 2: все 0x33
+};
+
+static inline HAL_StatusTypeDef Test_Flash_Write(void)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    // 1. Разблокировка и очистка флагов
+    if (HAL_FLASH_Unlock() != HAL_OK)
+        return HAL_ERROR;
+
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
+                           FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+
+    // 2. СТИРАНИЕ СЕКТОРА 4
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase = FLASH_TYPEERASE_SECTORS,
+        .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+        .Sector = FLASH_SECTOR_4,
+        .NbSectors = 1
+    };
+    uint32_t sector_error = 0;
+    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    if (status != HAL_OK)
+    {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    // 3. ЗАПИСЬ ДАННЫХ ПО НЕСКОЛЬКИМ АДРЕСАМ
+    for (uint32_t idx = 0; idx < ADDR_COUNT; idx++)
+    {
+        uint32_t addr = target_addrs[idx];
+        const uint8_t* data = patterns[idx];
+
+        for (uint32_t i = 0; i < 16; i += 4)
+        {
+            uint32_t word = 0;
+            for (uint32_t j = 0; j < 4 && (i + j) < 16; j++)
+                word |= ((uint32_t)data[i + j] << (j * 8));
+
+            status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+            if (status != HAL_OK) break;
+        }
+        if (status != HAL_OK) break;
+    }
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+#endif /* MYLIB_H */

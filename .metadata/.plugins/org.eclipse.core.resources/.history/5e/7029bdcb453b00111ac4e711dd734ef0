@@ -1,0 +1,89 @@
+#include "flash_manager.h"
+
+void flash_manager_init(void)
+{
+}
+
+FlashStatus flash_unlock(void)
+{
+    if (HAL_FLASH_Unlock() == HAL_OK)
+        return FLASH_OK;
+    else
+        return FLASH_ERR_UNLOCK;
+}
+
+FlashStatus flash_lock(void)
+{
+    if (HAL_FLASH_Lock() == HAL_OK)
+        return FLASH_OK;
+    else
+        return FLASH_ERR_LOCK;
+}
+
+FlashStatus flash_erase_sector(uint32_t sector, uint8_t voltage_range)
+{
+    FlashStatus status = FLASH_OK;
+
+    flash_clear_errors();
+
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase    = FLASH_TYPEERASE_SECTORS,
+        .VoltageRange = voltage_range,
+        .Sector       = sector,
+        .NbSectors    = 1
+    };
+
+    uint32_t sector_error = 0;
+    if (HAL_FLASHEx_Erase(&erase, &sector_error) != HAL_OK)
+    {
+        status = FLASH_ERR_ERASE;
+    }
+
+    return status;
+}
+
+FlashStatus flash_erase_region(const FlashRegion* region, uint8_t voltage_range)
+{
+    if (region == NULL)
+        return FLASH_ERR_ERASE;
+
+    return flash_erase_sector(region->sector, voltage_range);
+}
+
+FlashStatus flash_write_data(uint32_t address, const uint8_t* data, size_t len)
+{
+    FlashStatus status = FLASH_OK;
+
+    flash_clear_errors();
+
+    for (size_t i = 0; i < len; i += 4)
+    {
+        uint32_t word = 0xFFFFFFFF;
+        size_t bytes_to_copy = 4;
+        if (i + 4 > len)
+            bytes_to_copy = len - i;
+
+        for (size_t j = 0; j < bytes_to_copy; j++)
+        {
+            ((uint8_t*)&word)[j] = data[i + j];
+        }
+
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address + i, word) != HAL_OK)
+        {
+            status = FLASH_ERR_PROGRAM;
+            break;
+        }
+    }
+
+    return status;
+}
+
+void flash_clear_errors(void)
+{
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP    |
+                           FLASH_FLAG_OPERR  |
+                           FLASH_FLAG_WRPERR |
+                           FLASH_FLAG_PGAERR |
+                           FLASH_FLAG_PGPERR |
+                           FLASH_FLAG_PGSERR);
+}

@@ -1,0 +1,415 @@
+#ifndef MYLIB_H
+#define MYLIB_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+// ============================================================================
+//  КОНФИГУРАЦИОННЫЕ КОНСТАНТЫ
+// ============================================================================
+
+// Адреса секторов Flash (STM32F411RE)
+#define SECTOR_2_START          0x08008000UL
+#define SECTOR_2_END            0x0800BFFFUL
+#define SECTOR_2_SIZE           16384U
+
+// Целевые адреса (5-6 адресов в секторе 2)
+// ВНИМАНИЕ: замените на реальные адреса из вашей App
+static const uint32_t target_addresses[] = {
+    0x08008000,
+    0x08008010,
+    0x08008020,
+    0x08008030,
+    0x08008040,
+    0x08008050
+};
+#define TARGET_ADDR_COUNT       (sizeof(target_addresses) / sizeof(target_addresses[0]))
+
+// Буфер для строки HEX
+#define HEX_LINE_BUFFER_SIZE    128
+#define MAX_DATA_PER_ADDRESS    16
+
+// Коды ошибок
+#define ERROR_NONE              0
+#define ERROR_USB_INIT          1
+#define ERROR_CRC               2
+#define ERROR_ADDR_OUT_OF_RANGE 3
+#define ERROR_ADDR_NOT_FOUND    4
+#define ERROR_FLASH_ERASE       5
+#define ERROR_FLASH_WRITE       6
+#define ERROR_RX_TIMEOUT        7
+
+// ============================================================================
+//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================================================
+static uint8_t g_last_error = 0;
+static bool g_hex_processing_done = false;
+
+// Внутренние переменные парсера
+static uint32_t g_extended_linear_addr = 0;
+static uint16_t g_extended_segment_addr = 0;
+static bool g_use_linear = true;
+
+// Отслеживание найденных адресов
+static bool g_addr_found[TARGET_ADDR_COUNT];
+static uint8_t g_addr_data[TARGET_ADDR_COUNT][MAX_DATA_PER_ADDRESS];
+static uint8_t g_addr_data_len[TARGET_ADDR_COUNT];
+
+// Флаг стирания сектора 2
+static bool g_sector2_erased = false;
+
+// ============================================================================
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
+
+static inline uint8_t HexCharToByte(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+// ============================================================================
+//  CRC ПРОВЕРКА (по формуле из презентации)
+// ============================================================================
+static inline bool Hex_CheckCRC(const char* line, uint16_t len)
+{
+    if (len < 11 || line[0] != ':') return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (HexCharToByte(line[i]) << 4) | HexCharToByte(line[i+1]);
+    }
+
+    if (byte_count < 4) return false;
+
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < byte_count - 1; i++)
+    {
+        sum += bytes[i];
+    }
+
+    uint8_t crc_calculated = 0x01 + (uint8_t)(~sum & 0xFF);
+    uint8_t crc_received = bytes[byte_count - 1];
+
+    return (crc_calculated == crc_received);
+}
+
+// ============================================================================
+//  ПАРСИНГ СТРОКИ HEX
+// ============================================================================
+static inline bool Hex_ParseLine(const char* line, uint32_t* abs_addr,
+                                  uint8_t* data, uint8_t* data_len, uint8_t* record_type)
+{
+    if (line[0] != ':') return false;
+
+    uint16_t len = strlen(line);
+    if (len < 11) return false;
+
+    uint8_t bytes[128];
+    uint8_t byte_count = 0;
+
+    for (uint16_t i = 1; i < len - 1; i += 2)
+    {
+        if (i + 1 >= len) break;
+        bytes[byte_count++] = (HexCharToByte(line[i]) << 4) | HexCharToByte(line[i+1]);
+    }
+
+    if (byte_count < 4) return false;
+
+    uint8_t rec_len = bytes[0];
+    uint16_t addr = (bytes[1] << 8) | bytes[2];
+    uint8_t rtype = bytes[3];
+
+    // Вычисляем абсолютный адрес
+    if (g_use_linear)
+    {
+        *abs_addr = g_extended_linear_addr + addr;
+    }
+    else
+    {
+        *abs_addr = ((uint32_t)g_extended_segment_addr << 4) + addr;
+    }
+
+    *record_type = rtype;
+
+    if (rtype == 0x00 && rec_len > 0 && byte_count >= 4 + rec_len + 1)
+    {
+        *data_len = rec_len;
+        for (uint8_t i = 0; i < rec_len; i++)
+        {
+            data[i] = bytes[4 + i];
+        }
+    }
+    else
+    {
+        *data_len = 0;
+    }
+
+    return true;
+}
+
+// ============================================================================
+//  ОБРАБОТКА РАСШИРЕННЫХ АДРЕСОВ
+// ============================================================================
+static inline void Hex_UpdateExtendedAddress(uint8_t record_type, const uint8_t* data, uint8_t data_len)
+{
+    if (record_type == 0x04 && data_len >= 2)  // Extended Linear Address
+    {
+        g_extended_linear_addr = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16);
+        g_use_linear = true;
+    }
+    else if (record_type == 0x02 && data_len >= 2)  // Extended Segment Address
+    {
+        g_extended_segment_addr = (data[0] << 8) | data[1];
+        g_use_linear = false;
+    }
+}
+
+// ============================================================================
+//  СБРОС СОСТОЯНИЯ ПАРСЕРА
+// ============================================================================
+static inline void Hex_ResetExtendedAddress(void)
+{
+    g_extended_linear_addr = 0;
+    g_extended_segment_addr = 0;
+    g_use_linear = true;
+}
+
+// ============================================================================
+//  ИНИЦИАЛИЗАЦИЯ ОБРАБОТКИ HEX
+// ============================================================================
+static inline void HexProcessing_Init(void)
+{
+    Hex_ResetExtendedAddress();
+    g_sector2_erased = false;
+    g_hex_processing_done = false;
+
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        g_addr_found[i] = false;
+        g_addr_data_len[i] = 0;
+        memset(g_addr_data[i], 0xFF, MAX_DATA_PER_ADDRESS);
+    }
+}
+
+// ============================================================================
+//  ОБРАБОТКА ОДНОЙ СТРОКИ HEX
+// ============================================================================
+static inline bool HexProcessing_ProcessLine(char* line)
+{
+    // Удаляем символы новой строки
+    char* nl = strchr(line, '\r');
+    if (nl) *nl = '\0';
+    nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+
+    if (strlen(line) == 0) return true;
+    if (line[0] != ':') return true;
+
+    // Проверка CRC
+    if (!Hex_CheckCRC(line, strlen(line)))
+    {
+        SetError(ERROR_CRC);
+        return false;
+    }
+
+    uint32_t abs_addr = 0;
+    uint8_t data[MAX_DATA_PER_ADDRESS];
+    uint8_t data_len = 0;
+    uint8_t record_type = 0;
+
+    if (!Hex_ParseLine(line, &abs_addr, data, &data_len, &record_type))
+    {
+        return true;  // не фатально, пропускаем
+    }
+
+    // Обработка расширенных адресов
+    if (record_type == 0x02 || record_type == 0x04)
+    {
+        Hex_UpdateExtendedAddress(record_type, data, data_len);
+        return true;
+    }
+
+    // Конец файла
+    if (record_type == 0x01)
+    {
+        g_hex_processing_done = true;
+        return true;
+    }
+
+    // Игнорируем типы 03 и 05
+    if (record_type == 0x03 || record_type == 0x05)
+    {
+        return true;
+    }
+
+    // Тип 00: данные
+    if (record_type == 0x00)
+    {
+        // Проверка адреса в пределах сектора 2
+        if (abs_addr < SECTOR_2_START || abs_addr > SECTOR_2_END)
+        {
+            SetError(ERROR_ADDR_OUT_OF_RANGE);
+            return false;
+        }
+
+        // Ищем совпадение с target_addresses
+        for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+        {
+            if (abs_addr == target_addresses[i] && !g_addr_found[i])
+            {
+                g_addr_found[i] = true;
+                g_addr_data_len[i] = (data_len < MAX_DATA_PER_ADDRESS) ? data_len : MAX_DATA_PER_ADDRESS;
+                memcpy(g_addr_data[i], data, g_addr_data_len[i]);
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
+// ============================================================================
+//  ЗАВЕРШЕНИЕ ОБРАБОТКИ (ПРОВЕРКА И ЗАПИСЬ В FLASH)
+// ============================================================================
+static inline bool HexProcessing_Finalize(void)
+{
+    // Проверка: все ли target_addresses найдены?
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (!g_addr_found[i])
+        {
+            SetError(ERROR_ADDR_NOT_FOUND);
+            return false;
+        }
+    }
+
+    // Стираем сектор 2 (один раз)
+    if (!g_sector2_erased)
+    {
+        HAL_StatusTypeDef status = Flash_EraseSector2();
+        if (status != HAL_OK)
+        {
+            SetError(ERROR_FLASH_ERASE);
+            return false;
+        }
+        g_sector2_erased = true;
+    }
+
+    // Записываем данные
+    for (uint8_t i = 0; i < TARGET_ADDR_COUNT; i++)
+    {
+        if (g_addr_data_len[i] > 0)
+        {
+            HAL_StatusTypeDef status = Flash_WriteData(target_addresses[i],
+                                                        g_addr_data[i],
+                                                        g_addr_data_len[i]);
+            if (status != HAL_OK)
+            {
+                SetError(ERROR_FLASH_WRITE);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// ============================================================================
+//  РАБОТА С FLASH (СЕКТОР 2)
+// ============================================================================
+static inline HAL_StatusTypeDef Flash_EraseSector2(void)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase = FLASH_TYPEERASE_SECTORS,
+        .VoltageRange = FLASH_VOLTAGE_RANGE_3,
+        .Sector = FLASH_SECTOR_2,      // Сектор 2: 0x08008000 - 0x0800BFFF
+        .NbSectors = 1
+    };
+
+    uint32_t sector_error = 0;
+    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+
+    HAL_FLASH_Lock();
+
+    return status;
+}
+
+static inline HAL_StatusTypeDef Flash_WriteData(uint32_t addr, const uint8_t* data, uint32_t len)
+{
+    HAL_StatusTypeDef status = HAL_OK;
+
+    HAL_FLASH_Unlock();
+
+    for (uint32_t i = 0; i < len; i += 4)
+    {
+        uint32_t word = 0xFFFFFFFF;
+        for (uint32_t j = 0; j < 4 && i + j < len; j++)
+        {
+            ((uint8_t*)&word)[j] = data[i + j];
+        }
+
+        status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+        if (status != HAL_OK)
+        {
+            break;
+        }
+    }
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+// ============================================================================
+//  ИНДИКАЦИЯ ОШИБОК (МИГАНИЕ LD2)
+// ============================================================================
+static inline void BlinkErrorCode(uint8_t error_code)
+{
+    if (error_code == 0)
+    {
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+        return;
+    }
+
+    for (uint8_t cycle = 0; cycle < 3; cycle++)
+    {
+        for (uint8_t i = 0; i < error_code; i++)
+        {
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+            HAL_Delay(50);
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+            HAL_Delay(50);
+        }
+        HAL_Delay(500);
+    }
+}
+
+static inline void SetError(uint8_t error_code)
+{
+    g_last_error = error_code;
+    BlinkErrorCode(error_code);
+}
+
+// ============================================================================
+//  КОРМЛЕНИЕ WATCHDOG
+// ============================================================================
+static inline void FeedWatchdog(void)
+{
+    IWDG->KR = 0xAAAA;
+}
+
+#endif /* MYLIB_H */

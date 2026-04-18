@@ -1,0 +1,281 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Booter with USB CDC + HEX Parser + Flash Write (Sector 2)
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+#include "main.h"
+#include "bootloader.h"
+#include "mylib.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart2;
+IWDG_HandleTypeDef hiwdg;
+
+/* USER CODE BEGIN PV */
+RawCSR_t g_csr = {0};
+
+#define CDC_RX_BUFFER_SIZE   256
+static char g_line_buffer[HEX_LINE_BUFFER_SIZE];
+static uint16_t g_line_pos = 0;
+static bool g_cdc_ready = false;
+static bool g_button_processed = false;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_IWDG_Init(void);
+static void MX_USB_DEVICE_Init(void);
+
+/* USER CODE BEGIN PFP */
+void CDC_Receive_Handler(uint8_t* Buf, uint32_t Len);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+// ============================================================================
+//  ОБРАБОТЧИК ПРИНЯТЫХ ПО USB CDC ДАННЫХ
+// ============================================================================
+void CDC_Receive_Handler(uint8_t* Buf, uint32_t Len)
+{
+    if (!g_cdc_ready) return;
+
+    for (uint32_t i = 0; i < Len; i++)
+    {
+        char c = (char)Buf[i];
+
+        if (c == '\n')
+        {
+            if (g_line_pos > 0)
+            {
+                g_line_buffer[g_line_pos] = '\0';
+
+                if (!HexProcessing_ProcessLine(g_line_buffer))
+                {
+                    g_cdc_ready = false;
+                    return;
+                }
+                g_line_pos = 0;
+            }
+        }
+        else if (c == '\r')
+        {
+            continue;
+        }
+        else
+        {
+            if (g_line_pos < HEX_LINE_BUFFER_SIZE - 1)
+            {
+                g_line_buffer[g_line_pos++] = c;
+            }
+            else
+            {
+                SetError(ERROR_CRC);
+                g_cdc_ready = false;
+                return;
+            }
+        }
+    }
+
+    if (g_hex_processing_done)
+    {
+        g_cdc_ready = false;
+
+        if (HexProcessing_Finalize())
+        {
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+            HAL_Delay(2000);
+            HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+        }
+    }
+}
+
+/* USER CODE END 0 */
+
+int main(void)
+{
+    /* USER CODE BEGIN 1 */
+
+    /* USER CODE END 1 */
+
+    HAL_Init();
+
+    /* USER CODE BEGIN Init */
+
+    /* USER CODE END Init */
+
+    SystemClock_Config();
+
+    /* USER CODE BEGIN SysInit */
+
+    /* USER CODE END SysInit */
+
+    MX_GPIO_Init();
+    MX_USART2_UART_Init();
+    MX_IWDG_Init();
+    MX_USB_DEVICE_Init();
+
+    /* USER CODE BEGIN 2 */
+    Read_Raw_CSR(&g_csr);
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+
+    HexProcessing_Init();
+    g_line_pos = 0;
+    g_cdc_ready = false;
+    g_button_processed = false;
+    /* USER CODE END 2 */
+
+    /* Infinite loop */
+    while (1)
+    {
+        FeedWatchdog();
+
+        // Проверка кнопки
+        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+        {
+            HAL_Delay(50);
+            if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+            {
+                HexProcessing_Init();
+                g_line_pos = 0;
+                g_cdc_ready = true;
+                g_button_processed = true;
+
+                HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+                HAL_Delay(1000);
+                HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+                while (g_cdc_ready)
+                {
+                    FeedWatchdog();
+                    HAL_Delay(10);
+                }
+
+                HAL_Delay(500);
+                g_button_processed = false;
+            }
+        }
+
+        HAL_Delay(10);
+    }
+}
+
+// ============================================================================
+//  ИНИЦИАЛИЗАЦИИ (сгенерированы CubeMX)
+// ============================================================================
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 4;
+    RCC_OscInitStruct.PLL.PLLN = 72;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 3;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+}
+
+static void MX_IWDG_Init(void)
+{
+    hiwdg.Instance = IWDG;
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_128;
+    hiwdg.Init.Reload = 4095;
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) Error_Handler();
+}
+
+static void MX_USART2_UART_Init(void)
+{
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}
+
+static void MX_GPIO_Init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+    GPIO_InitStruct.Pin = B1_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = LD2_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+}
+
+static void MX_USB_DEVICE_Init(void)
+{
+    // Функция генерируется CubeMX в файле usb_device.c
+    // Убедитесь, что в проекте есть этот файл
+    extern void MX_USB_DEVICE_Init(void);
+    MX_USB_DEVICE_Init();
+}
+
+void Error_Handler(void)
+{
+    __disable_irq();
+    while (1) {}
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line) {}
+#endif

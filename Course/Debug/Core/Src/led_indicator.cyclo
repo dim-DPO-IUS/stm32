@@ -1,0 +1,8 @@
+../Core/Src/led_indicator.c:17:13:_led_write	2
+../Core/Src/led_indicator.c:30:6:led_init	1
+../Core/Src/led_indicator.c:41:6:led_set_state	5
+../Core/Src/led_indicator.c:70:9:led_get_state	1
+../Core/Src/led_indicator.c:75:6:led_update	10
+../Core/Src/led_indicator.c:132:6:led_on	1
+../Core/Src/led_indicator.c:137:6:led_off	1
+../Core/Src/led_indicator.c:142:6:led_toggle	1
